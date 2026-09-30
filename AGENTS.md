@@ -18,7 +18,7 @@
 
 - User-facing copy is Argentine Spanish using `vos`; keep it professional and avoid medical claims, guaranteed outcomes, or invented proof.
 - Never invent the WhatsApp number, service areas, prices, schedules, certifications, testimonials, ratings, social profiles, or photos. Development placeholders must be unmistakable and must not reach production.
-- The public MVP must not be blocked by Supabase analytics, Telegram, or the daily report; those are separate releases defined in section 54 of the plan.
+- The public MVP must not be blocked by PostgreSQL analytics, Telegram, or the daily report; those are separate releases defined in section 54 of the plan.
 
 ## Conversion And Analytics
 
@@ -32,7 +32,8 @@
 
 ## Server Boundaries
 
-- Supabase access is server-only through `/api/events`; do not introduce browser Supabase credentials or public table policies.
-- Never expose `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, or `CRON_SECRET` to Client Components or logs.
+- PostgreSQL access is server-only through `/api/events`; do not introduce browser database credentials or direct public table access.
+- Never expose `DATABASE_URL`, `PGPASSWORD`, `RATE_LIMIT_SECRET`, `TELEGRAM_BOT_TOKEN`, or `TELEGRAM_CHAT_ID` to Client Components or logs.
 - Keep event insertion idempotent through `clientEventId`, validate closed event/source values, limit payload sizes, and rate-limit the production endpoint.
-- Daily report boundaries use `America/Argentina/Buenos_Aires`; Vercel Cron schedules are UTC and must be converted explicitly.
+- Deno Deploy injects PostgreSQL connection variables for attached databases. Use `deno task --tunnel ...` locally instead of copying managed credentials.
+- Daily report boundaries use `America/Argentina/Buenos_Aires`; `Deno.cron` schedules are UTC and must be converted explicitly. Verify how top-level cron registration integrates with Next.js before implementing it.

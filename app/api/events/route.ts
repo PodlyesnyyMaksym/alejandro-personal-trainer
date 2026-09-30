@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { insertEvent } from "@/lib/database";
 import { isRateLimited } from "@/lib/rate-limit";
-import { insertEvent } from "@/lib/supabase";
 import {
   EVENT_TYPES,
   WHATSAPP_SOURCES,
@@ -87,8 +87,12 @@ export async function POST(request: Request) {
     return new NextResponse(null, { status: 204 });
   }
 
-  if (isRateLimited(getClientIdentifier(request))) {
-    return NextResponse.json({ error: "Too many requests." }, { status: 429 });
+  try {
+    if (await isRateLimited(getClientIdentifier(request))) {
+      return NextResponse.json({ error: "Too many requests." }, { status: 429 });
+    }
+  } catch {
+    return NextResponse.json({ error: "Analytics unavailable." }, { status: 503 });
   }
 
   const contentLength = Number(request.headers.get("content-length") ?? 0);

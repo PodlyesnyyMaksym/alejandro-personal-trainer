@@ -1,5 +1,3 @@
-create extension if not exists pgcrypto;
-
 create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
   client_event_id uuid not null unique,
@@ -30,4 +28,11 @@ create index if not exists events_session_id_idx on public.events (session_id);
 create index if not exists events_type_created_at_idx on public.events (event_type, created_at);
 create index if not exists events_utm_source_created_at_idx on public.events (utm_source, created_at);
 
-alter table public.events enable row level security;
+create table if not exists public.analytics_rate_limits (
+  bucket text primary key,
+  window_started_at timestamptz not null,
+  request_count integer not null check (request_count > 0)
+);
+
+create index if not exists analytics_rate_limits_window_idx
+  on public.analytics_rate_limits (window_started_at);

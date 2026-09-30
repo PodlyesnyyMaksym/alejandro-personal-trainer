@@ -12,9 +12,6 @@
 .env*
 !.env.example
 
-# Vercel
-.vercel
-
 # Logs
 *.log
 

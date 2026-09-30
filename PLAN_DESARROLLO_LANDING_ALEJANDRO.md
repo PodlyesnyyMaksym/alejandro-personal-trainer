@@ -91,9 +91,9 @@ Usar:
 - TypeScript.
 - Tailwind CSS.
 - Motion / Framer Motion para animaciones.
-- Supabase para guardar eventos.
+- Prisma PostgreSQL administrado desde Deno Deploy para guardar eventos, mediante SQL directo con `pg` y sin Prisma ORM.
 - Telegram Bot API para avisos y estadísticas.
-- Vercel para deploy.
+- Deno Deploy para deploy.
 - ESLint.
 - Prettier.
 - Git.
@@ -285,7 +285,8 @@ alejandro-personal-trainer/
 ├── lib/
 │   ├── analytics.ts
 │   ├── env.ts
-│   ├── supabase.ts
+│   ├── database.ts
+│   ├── rate-limit.ts
 │   ├── telegram.ts
 │   └── utils.ts
 │
@@ -297,7 +298,14 @@ alejandro-personal-trainer/
 ├── types/
 │   └── analytics.ts
 │
+├── migrations/
+│   └── 001_create_events.sql
+│
+├── scripts/
+│   └── migrate.mjs
+│
 ├── .env.example
+├── deno.json
 ├── .env.local
 ├── README.md
 ├── package.json
@@ -316,7 +324,7 @@ Antes de cerrar el diseño visual deben estar confirmados o marcados explícitam
 - Biografía y años de experiencia aprobados por Alejandro.
 - Certificaciones, testimonios o perfiles profesionales que puedan verificarse.
 - Dominio deseado.
-- Responsables y accesos de Vercel, Supabase y Telegram.
+- Responsables y accesos de Deno Deploy, Prisma PostgreSQL y Telegram.
 
 No inventar contenido si falta un insumo. Se permiten placeholders claramente marcados durante desarrollo, pero no en producción.
 
@@ -334,7 +342,7 @@ No inventar contenido si falta un insumo. Se permiten placeholders claramente ma
 
 - Dominio definitivo: resolver antes del deploy.
 - Certificaciones y testimonios: no mostrar hasta recibir material verificable y autorizado.
-- Accesos a Vercel, Supabase y Telegram: resolver antes de la release que los necesite.
+- Accesos a Deno Deploy y Telegram: resolver antes de la release que los necesite. La base Prisma PostgreSQL se adjunta a la app de Deno Deploy.
 
 ---
 
@@ -953,7 +961,7 @@ Nunca hardcodear URLs de WhatsApp en componentes individuales.
 
 Registrar los clicks importantes sin depender exclusivamente de herramientas externas.
 
-Crear tabla Supabase:
+Crear tablas en PostgreSQL mediante `migrations/001_create_events.sql`:
 
 ```sql
 create table public.events (
@@ -986,14 +994,13 @@ create index events_session_id_idx on public.events (session_id);
 create index events_type_created_at_idx on public.events (event_type, created_at);
 create index events_utm_source_created_at_idx on public.events (utm_source, created_at);
 
-alter table public.events enable row level security;
 ```
 
 `client_event_id` se genera en el navegador y permite hacer la inserción idempotente ante reintentos. La API debe tratar un evento repetido como recibido, sin duplicarlo.
 
 `TrackPageView` debe emitir como máximo un `page_view` por carga real del documento. Debe reutilizar el mismo `client_event_id` ante reintentos y evitar duplicados producidos por remounts durante desarrollo.
 
-No crear políticas de acceso para `anon` o `authenticated`. La escritura y lectura deben realizarse exclusivamente desde rutas server-side.
+No exponer credenciales ni acceso directo a la base desde el navegador. La escritura y lectura deben realizarse exclusivamente desde rutas server-side.
 
 No guardar `user_agent` por defecto. Incorporarlo únicamente si existe una necesidad medible, una política de retención y una revisión de privacidad.
 
@@ -1008,7 +1015,7 @@ Antes del deploy debe documentarse:
 - Qué datos se registran y con qué finalidad.
 - Tiempo de retención.
 - Mecanismo de eliminación.
-- Responsable de acceso a Supabase y Telegram.
+- Responsable de acceso a Deno Deploy, PostgreSQL y Telegram.
 - Necesidad legal de aviso o consentimiento según la implementación final.
 
 Si el navegador expresa `Do Not Track`, no crear identificadores ni registrar eventos internos. Esto nunca debe desactivar ni retrasar los enlaces de WhatsApp.
@@ -1017,9 +1024,10 @@ Si el navegador expresa `Do Not Track`, no crear identificadores ni registrar ev
 
 Implementado:
 
-- Migración SQL con constraints, índices, RLS e idempotencia por `client_event_id`.
-- Endpoint `POST /api/events` con validación cerrada, límite de payload y rate limit local.
-- Acceso a Supabase exclusivamente server-side mediante REST y `service_role`.
+- Migración SQL con constraints, índices e idempotencia por `client_event_id`.
+- Runner de migraciones con checksum, transacciones y advisory lock.
+- Endpoint `POST /api/events` con validación cerrada, límite de payload y rate limit distribuido en PostgreSQL.
+- Acceso a PostgreSQL exclusivamente server-side mediante SQL parametrizado con `pg`.
 - Sesiones anónimas con expiración de 30 minutos.
 - Captura de los cinco campos UTM al iniciar la sesión.
 - Respeto de `Do Not Track` en cliente y servidor.
@@ -1027,11 +1035,10 @@ Implementado:
 
 Bloqueos para completar la fase:
 
-- Crear o seleccionar el proyecto real de Supabase.
-- Aplicar `supabase/migrations/001_create_events.sql`.
-- Configurar `SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY`.
+- Crear la app real de Deno Deploy y adjuntar una base Prisma PostgreSQL.
+- Configurar `RATE_LIMIT_SECRET` en los timelines necesarios.
+- Aplicar `migrations/001_create_events.sql` con `deno task --tunnel migrate`.
 - Verificar inserción, duplicados y errores contra la base real.
-- Sustituir o complementar el rate limit local con una solución distribuida antes de producción serverless.
 
 La Fase 12 permanece `EN CURSO` hasta resolver estos puntos.
 
@@ -1299,7 +1306,7 @@ No calcular “hoy” usando directamente la fecha UTC del servidor. El endpoint
 
 # 27. Automatización del resumen
 
-En Vercel puede utilizarse un Cron Job.
+La opción principal es `Deno.cron`.
 
 Ejemplo conceptual:
 
@@ -1308,17 +1315,13 @@ una vez por día
 20:00 Argentina
 ```
 
-Verificar siempre timezone.
+Verificar siempre timezone. `Deno.cron` se configura en UTC: las 20:00 de
+`America/Argentina/Buenos_Aires` corresponden actualmente a las 23:00 UTC. Revisar esta conversión
+si cambia la plataforma o la normativa horaria.
 
-Vercel Cron se configura en UTC. Documentar la expresión equivalente a las 20:00 de Argentina y volver a verificarla si cambia la plataforma o la zona horaria definida.
-
-El endpoint del cron debe estar protegido mediante secret.
-
-Variables:
-
-```env
-CRON_SECRET=
-```
+Antes de implementarlo, validar que el entrypoint generado para Next.js ejecute el registro top-level
+de `Deno.cron`. No asumir que una route de Next.js se descubre como cron automáticamente. Si el
+adaptador no lo permite, crear un worker Deno separado o usar un endpoint protegido como fallback.
 
 ---
 
@@ -1575,10 +1578,11 @@ Controlar:
 Nunca enviar al frontend:
 
 ```text
-SUPABASE_SERVICE_ROLE_KEY
+DATABASE_URL
+PGPASSWORD
+RATE_LIMIT_SECRET
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
-CRON_SECRET
 ```
 
 Usarlos sólo server-side.
@@ -1593,10 +1597,10 @@ lib/env.ts
 
 Requisitos adicionales:
 
-- Las escrituras a Supabase deben pasar por `/api/events`.
-- No importar clientes con `service_role` desde Client Components.
-- Habilitar RLS en la tabla de eventos sin políticas públicas.
-- Proteger `/api/reports/daily` con comparación segura de `CRON_SECRET`.
+- Las escrituras a PostgreSQL deben pasar por `/api/events`.
+- No importar el pool ni credenciales de base desde Client Components.
+- Mantener la base adjunta sin acceso directo desde el navegador.
+- Si se usa un endpoint HTTP como fallback para el reporte, protegerlo con un secreto dedicado y comparación segura.
 - Aplicar rate limiting al endpoint público de eventos.
 - No registrar tokens, secretos ni payloads completos en logs.
 
@@ -1608,18 +1612,16 @@ Ejemplo:
 
 ```env
 SITE_URL=
-SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
+DATABASE_URL=
+RATE_LIMIT_SECRET=
 
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-CRON_SECRET=
-
 WHATSAPP_PHONE=
 ```
 
-No se requieren variables `NEXT_PUBLIC_` inicialmente. El Server Component o layout puede leer `SITE_URL` y `WHATSAPP_PHONE`, construir los valores públicos necesarios y pasarlos como props. Supabase se utiliza exclusivamente server-side.
+No se requieren variables `NEXT_PUBLIC_` inicialmente. El Server Component o layout puede leer `SITE_URL` y `WHATSAPP_PHONE`, construir los valores públicos necesarios y pasarlos como props. PostgreSQL se utiliza exclusivamente server-side. Deno Deploy inyecta `DATABASE_URL` y las variables `PG*` al adjuntar la base; localmente deben obtenerse mediante `deno task --tunnel ...` en lugar de copiar credenciales administradas.
 
 ---
 
@@ -1678,7 +1680,7 @@ Priorizar pocas pruebas de alto valor. No es obligatorio crear tests unitarios p
 
 Simular:
 
-- Supabase caído.
+- PostgreSQL no disponible.
 - timeout.
 - error 500.
 - usuario sin conexión.
@@ -1706,10 +1708,10 @@ No romper el flujo de analytics.
 
 # 43. Fase 20 — Deploy
 
-Deploy recomendado:
+Deploy elegido:
 
 ```text
-Vercel
+Deno Deploy
 ```
 
 ## Checklist
@@ -1729,7 +1731,7 @@ Vercel
 
 ### MVP analytics
 
-- Supabase producción.
+- Prisma PostgreSQL de producción adjunto.
 - Analytics.
 - Rate limiting.
 - Retención y privacidad documentadas.
@@ -1737,7 +1739,7 @@ Vercel
 ### Operación posterior
 
 - Telegram producción.
-- Cron protegido.
+- Cron de Deno verificado o fallback HTTP protegido.
 - Reporte diario idempotente.
 
 ---
@@ -1775,7 +1777,7 @@ feat: add training goals section
 
 feat: implement whatsapp tracking
 
-feat: integrate supabase events
+feat: integrate postgres events
 
 feat: add telegram reports
 
@@ -1812,7 +1814,7 @@ Seguir este orden:
 17 performance
 18 testing del camino crítico público
 19 deploy del MVP público
-20 Supabase y analytics API
+20 PostgreSQL y analytics API
 21 UTM, sesiones y testing analytics
 22 validación de datos reales
 23 Telegram
@@ -2163,14 +2165,14 @@ La primera versión publicable incluye:
 - Accesibilidad y navegación por teclado.
 - Lighthouse dentro de los objetivos sobre el build de producción.
 - Monitoreo preparado para validar Core Web Vitals cuando exista tráfico real suficiente.
-- Deploy en Vercel.
+- Deploy en Deno Deploy.
 
 ## 54.2 MVP analytics
 
 Se incorpora después de validar el MVP público:
 
 - Tracking de `page_view` y `whatsapp_click`.
-- Supabase funcionando únicamente server-side.
+- Prisma PostgreSQL funcionando únicamente server-side.
 - UTM tracking completo.
 - Sesiones anónimas con expiración.
 - Rate limiting e idempotencia.
@@ -2304,7 +2306,7 @@ Si falta alguno, usar placeholder claramente marcado.
 - [ ] Tracking.
 - [ ] Session ID.
 - [ ] UTM.
-- [ ] Supabase.
+- [ ] PostgreSQL.
 - [ ] Idempotencia.
 - [ ] Rate limiting.
 - [ ] Retención y privacidad documentadas.
