@@ -1,10 +1,10 @@
 import { Container } from "@/components/layout/Container";
 import { WhatsAppButton } from "@/components/ui/WhatsAppButton";
 
-export function FinalCTA() {
+export function FinalCTA({ id = "contacto" }: { id?: string } = {}) {
   return (
     <section
-      id="contacto"
+      id={id}
       aria-labelledby="final-cta-title"
       className="relative overflow-hidden bg-background py-[var(--section-space)]"
     >

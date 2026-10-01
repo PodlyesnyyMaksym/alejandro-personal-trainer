@@ -18,10 +18,18 @@ function createPool() {
     max: 3,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 5_000,
+    query_timeout: 8_000,
+    statement_timeout: 5_000,
+    lock_timeout: 1_000,
     allowExitOnIdle: true,
   };
 
-  return new Pool(config);
+  const pool = new Pool(config);
+  // Never log the pg error: messages/detail can contain credentials or SQL payloads.
+  pool.on("error", () => {
+    console.error("PostgreSQL idle connection failed.");
+  });
+  return pool;
 }
 
 function getPool() {

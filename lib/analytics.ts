@@ -3,6 +3,7 @@ import type { AnalyticsEvent, EventSource, EventType, UtmData } from "@/types/an
 const SESSION_KEY = "landing_session";
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const UTM_KEYS = ["source", "medium", "campaign", "content", "term"] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type StoredSession = {
   id: string;
@@ -18,7 +19,10 @@ function doNotTrackEnabled() {
 }
 
 function cleanUtmValue(value: string | null) {
-  const normalized = value?.trim().slice(0, 100);
+  const normalized = value
+    ?.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .trim()
+    .slice(0, 100);
   return normalized || null;
 }
 
@@ -30,26 +34,58 @@ function captureUtm(): UtmData {
   ) as UtmData;
 }
 
-function readSession(): StoredSession | null {
+function discardSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // Storage can be unavailable; tracking must never affect navigation.
+  }
+  return null;
+}
+
+function readSession(now: number): StoredSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
 
     const value: unknown = JSON.parse(raw);
-    if (!value || typeof value !== "object") return null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return discardSession();
+    }
 
     const session = value as Partial<StoredSession>;
     if (
       typeof session.id !== "string" ||
+      !UUID_PATTERN.test(session.id) ||
       typeof session.lastActivityAt !== "number" ||
-      !session.utm
+      !Number.isFinite(session.lastActivityAt) ||
+      session.lastActivityAt < 0 ||
+      session.lastActivityAt > now ||
+      now - session.lastActivityAt >= SESSION_TIMEOUT_MS ||
+      !session.utm ||
+      typeof session.utm !== "object" ||
+      Array.isArray(session.utm) ||
+      !UTM_KEYS.every((key) => {
+        const value = session.utm?.[key];
+        return (
+          Object.hasOwn(session.utm!, key) &&
+          (value === null || (typeof value === "string" && value.length <= 100))
+        );
+      }) ||
+      Object.keys(session.utm).some((key) => !UTM_KEYS.some((utmKey) => utmKey === key))
     ) {
-      return null;
+      return discardSession();
     }
 
-    return session as StoredSession;
+    return {
+      id: session.id,
+      lastActivityAt: session.lastActivityAt,
+      utm: Object.fromEntries(
+        UTM_KEYS.map((key) => [key, cleanUtmValue(session.utm![key])]),
+      ) as UtmData,
+    };
   } catch {
-    return null;
+    return discardSession();
   }
 }
 
@@ -57,9 +93,8 @@ function getSession() {
   if (doNotTrackEnabled()) return null;
 
   const now = Date.now();
-  const stored = readSession();
-  const isActive = stored && now - stored.lastActivityAt < SESSION_TIMEOUT_MS;
-  const session: StoredSession = isActive
+  const stored = readSession(now);
+  const session: StoredSession = stored
     ? { ...stored, lastActivityAt: now }
     : { id: crypto.randomUUID(), lastActivityAt: now, utm: captureUtm() };
 
@@ -87,22 +122,30 @@ function createEvent(eventType: EventType, source: EventSource): AnalyticsEvent 
 }
 
 export function sendAnalyticsEvent(eventType: EventType, source: EventSource) {
-  const event = createEvent(eventType, source);
-  if (!event) return;
+  try {
+    const event = createEvent(eventType, source);
+    if (!event) return;
 
-  const body = JSON.stringify(event);
-  const sent = navigator.sendBeacon?.(
-    "/api/events",
-    new Blob([body], { type: "application/json" }),
-  );
+    const body = JSON.stringify(event);
+    let sent = false;
+    try {
+      sent =
+        navigator.sendBeacon?.("/api/events", new Blob([body], { type: "application/json" })) ??
+        false;
+    } catch {
+      // A throwing beacon implementation still gets the keepalive fallback.
+    }
 
-  if (!sent) {
-    void fetch("/api/events", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-      keepalive: true,
-    }).catch(() => undefined);
+    if (!sent) {
+      void fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => undefined);
+    }
+  } catch {
+    // Analytics is best effort, including synchronous browser API failures.
   }
 }
 

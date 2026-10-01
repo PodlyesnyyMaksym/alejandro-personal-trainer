@@ -1020,6 +1020,42 @@ Antes del deploy debe documentarse:
 
 Si el navegador expresa `Do Not Track`, no crear identificadores ni registrar eventos internos. Esto nunca debe desactivar ni retrasar los enlaces de WhatsApp.
 
+### Documentación de privacidad y retención (2026-09-30)
+
+Qué datos se registran y con qué finalidad:
+
+- `public.events` guarda `client_event_id`, `event_type` (`page_view` o `whatsapp_click`), `source`, `session_id`, `landing_path`, los cinco campos UTM y `created_at`.
+- `public.analytics_rate_limits` guarda `bucket` (HMAC-SHA256 del identificador y minuto con `RATE_LIMIT_SECRET`), `window_started_at` y `request_count`. El identificador es compartido por defecto; solo puede ser IP tras configurar y verificar un header confiable del ingress. HMAC no garantiza anonimización.
+- No existen campos específicos de nombre o teléfono, ni almacenamiento de IP en claro o `user_agent` en estas tablas. UTM es texto libre y puede contener datos personales: no introducir datos de contacto en campañas. Los filtros de controles no garantizan ausencia de datos personales.
+- Finalidad: calcular la tasa de intención de contacto (`whatsapp_click_rate`) y el rendimiento de los CTAs de WhatsApp. El código no implementa publicidad. Debe revisarse el tratamiento por proveedores de infraestructura y sus contratos.
+- El `session_id` es un identificador seudónimo de sesión; se renueva tras 30 minutos sin actividad de tracking. El objeto con UUID, UTM y última actividad se conserva en `localStorage` hasta ser reemplazado o eliminado; el vencimiento lógico no borra automáticamente ese almacenamiento.
+
+Tiempo de retención:
+
+- `public.events`: objetivo de retención máxima de 12 meses sobre `created_at`; todavía no garantizado automáticamente. Antes de producción deben acordarse responsable, periodicidad y evidencia de purga, incluyendo backups/snapshots del proveedor.
+- `public.analytics_rate_limits`: las peticiones que llegan al rate limiter eliminan filas con más de 1 día. Sin tráfico o ante fallos de DB pueden permanecer más tiempo.
+
+Mecanismo de eliminación:
+
+- Rate limiting: automático, la propia consulta de incremento borra las filas vencidas.
+- Events: por ahora manual sobre la base adjunta:
+
+```sql
+delete from public.events where created_at < now() - interval '12 months';
+```
+
+- No existe una tarea automática de purga en el alcance de esta fase; si se automatiza, debe quedar definida con `Deno.cron` en horario convertido a `America/Argentina/Buenos_Aires`.
+
+Responsable de acceso:
+
+- Deno Deploy y PostgreSQL: cuentas bajo la organización `atenon` en `console.deno.com`. Responsable confirmado por el usuario: él mismo, dueño del proyecto; no se inventa una identidad pública adicional.
+- Telegram: **pendiente de confirmar** (la Fase 13 aún no está implementada).
+
+Necesidad legal de aviso o consentimiento:
+
+- La implementación usa almacenamiento local e identificadores seudónimos y puede recibir información personal en UTM. Respeta `Do Not Track`, pero eso no determina por sí solo las obligaciones de aviso o consentimiento. Actualmente no incluye banner.
+- La necesidad y contenido de un aviso o consentimiento deben validarse con revisión legal antes de producción: **pendiente de revisión**.
+
 ## 18.2 Estado de implementación
 
 Implementado:
@@ -1028,19 +1064,71 @@ Implementado:
 - Runner de migraciones con checksum, transacciones y advisory lock.
 - Endpoint `POST /api/events` con validación cerrada, límite de payload y rate limit distribuido en PostgreSQL.
 - Acceso a PostgreSQL exclusivamente server-side mediante SQL parametrizado con `pg`.
-- Sesiones anónimas con expiración de 30 minutos.
+- Identificadores seudónimos de sesión con renovación lógica tras 30 minutos sin actividad de tracking.
 - Captura de los cinco campos UTM al iniciar la sesión.
 - Respeto de `Do Not Track` en cliente y servidor.
 - `page_view` único por carga y clicks de WhatsApp no bloqueantes con `sendBeacon`/`keepalive`.
 
-Bloqueos para completar la fase:
+Verificado contra la base real de Deno Deploy el `2026-09-30`:
 
-- Crear la app real de Deno Deploy y adjuntar una base Prisma PostgreSQL.
-- Configurar `RATE_LIMIT_SECRET` en los timelines necesarios.
-- Aplicar `migrations/001_create_events.sql` con `deno task --tunnel migrate`.
-- Verificar inserción, duplicados y errores contra la base real.
+- App `atenon/alejandro-personal-trainer` creada con preset `nextjs` y base Prisma PostgreSQL `acarrizo-db-pd` adjunta.
+- `WHATSAPP_PHONE` y `RATE_LIMIT_SECRET` configuradas como variables de la app en Deno Deploy; sin `WHATSAPP_PHONE` el prerender de `/` falla y el build revienta.
+- Migración aplicada mediante `deno task --tunnel migrate` sobre la base lógica `6224ce-local`; segunda corrida omitida (checksum idempotente).
+- `POST /api/events` contra el server local corriendo bajo tunnel con la base real:
+  - Evento válido → `202`.
+  - Mismo `clientEventId` repetido → `202` sin fila extra.
+  - Payload inválido → `400`.
+  - Payload mayor a 4 KB → `413`.
+  - Cabecera `DNT: 1` → `204` sin crear evento.
+  - Ráfaga de 40 peticiones → exactamente `30 × 202` y `10 × 429` (rate limit de 30/min distribuido en `analytics_rate_limits`).
+- Los eventos se insertan en PostgreSQL; el cliente conserva sesión y UTM en `localStorage`. Los enlaces de WhatsApp siguen funcionando aunque la API devuelva `503`.
+
+Endurecimiento local implementado (2026-09-30): lectura limitada a 4096 bytes, validación de controles y pathname, confianza de IP explícita y conservadora, `Retry-After`, diagnósticos sanitizados, timeouts y listener del pool. Sesiones corruptas se regeneran, excepciones de tracking se aíslan y el botón central se registra. El footer es hermano de `main`. Pruebas offline disponibles con `npm run test`; verificación read-only de esquema y ledger con `deno task --tunnel db:verify`. La migración aplicada `001` no se modificó.
+
+Bloqueos restantes para completar la fase:
+
+- La app configura pre-deploy con `deno run -A --no-config --node-modules-dir=manual` para los scripts standalone de migración, verificación y limpieza de la prueba reservada, unidos con `&&`. Se preservan otros ajustes de la app. Se corrigieron ausencia de npm en pre-deploy y de scripts en la raíz del artefacto. Los logs confirman que Preview omite pre-deploy; queda pendiente migrar/verificar esa base por una ruta soportada. GitHub automático sigue pendiente. Producción sí acepta envíos tras ejecutar migración/verificación.
+- Cerrar la revisión legal/identificación pública y la operación de retención de analytics. El responsable de acceso ya fue confirmado como el dueño del proyecto; la retención indefinida decidida para contactos no modifica los 12 meses de analytics.
+- Revalidar esquema real y API por timeline tras el endurecimiento; confirmar TLS, afinidad de sesión del endpoint de migraciones y garantía del header del ingress antes de configurar confianza en IP. Definir operación de retención y verificar navegación en navegador real.
 
 La Fase 12 permanece `EN CURSO` hasta resolver estos puntos.
+
+### 18.3 Ampliación aprobada: formulario voluntario (2026-09-30)
+
+El usuario aprobó añadir nombre y teléfono proporcionados voluntariamente, sin bloquear WhatsApp.
+No se infieren datos de quienes solo hacen clic. Implementado como release opt-in mediante
+`CONTACT_FORM_ENABLED=true` en build y runtime; la configuración por defecto sigue deshabilitada, y el usuario autorizó su activación y deploy.
+
+- Formulario accesible con aceptación explícita del aviso `contact-v1`, honeypot y estados de carga/error/éxito.
+- `POST /api/contacts`: validación cerrada, body limitado a 4096 bytes, allowlist explícita `CONTACT_FORM_ALLOWED_ORIGINS` para orígenes públicos detrás del proxy (coincidencia directa en local sin lista), rate limit separado e inserción idempotente por `client_submission_id`.
+- Migración nueva `002_create_contacts.sql`, sin alterar `001`. Datos de contacto separados de analytics; sin UTM, session IDs, teléfonos en URLs/logs ni endpoint público de lectura.
+- Nombre, teléfono, versión del aviso y timestamps de consentimiento/creación en PostgreSQL. DNT no impide una consulta solicitada expresamente.
+- WhatsApp sigue disponible sin formulario ni JavaScript; envío de formulario requiere JavaScript y no navega automáticamente.
+- No se implementan marketing, panel de contactos, validación por SMS ni notificaciones automáticas.
+
+Responsable de contactos confirmado: el usuario, dueño del proyecto. Retención decidida por el
+usuario: indefinida según su criterio, hasta eliminación por decisión del responsable o solicitud
+de la persona mediante WhatsApp. El aviso visible de la primera versión todavía no publicada
+`contact-v1` incluye esta condición. No se programa purga de contactos; los 12 meses de analytics
+no se modifican. La decisión del usuario no constituye validación legal: quedan pendientes la
+identificación pública completa del responsable, revisión de derechos/aviso y tratamiento de backups.
+
+Aplicar `002` y verificar esquema/origen real por timeline antes de recibir contactos. El proveedor
+rechazó `REVOKE` con SQLSTATE `42501`; antes de aplicar `002` se confirmó ausencia de grants a
+PUBLIC en las tablas existentes y de defaults públicos de tablas. La migración aún no aplicada
+se adapta con un guard que aborta si la tabla contacts hereda permisos PUBLIC, en vez de ignorarlos.
+Pruebas locales no sustituyen validación remota. Esta ampliación no cierra la Fase 12 ni inicia Telegram.
+
+Activación verificada en Producción (2026-09-30):
+
+- `CONTACT_FORM_ENABLED=true` en todos los contextos de Deno (build y runtime). `CONTACT_FORM_ALLOWED_ORIGINS` limita los envíos al origen público de Producción.
+- Migraciones `001` y `002` aplicadas; pre-deploy de la revisión `1khzn58fcy2j` confirmó `Schema: OK` y ledger con `pending=0`.
+- Producción: `https://alejandro-personal-trainer.atenon.deno.net`, revisión `1khzn58fcy2j` con estado `routed`.
+- Envío sintético válido y reintento en Producción → `202` y `202`; limpieza posterior confirmó exactamente una fila de prueba eliminada. No se dejó un cliente ficticio en los contactos.
+- Comprobación posterior: página `200`, formulario y aviso visibles, WhatsApp nativo presente, payload inválido `400`, origen ajeno `403`, body excesivo `413` y DNT de analytics `204`.
+- En local bajo tunnel: inserción y duplicado → `202`, una sola fila comprobada y eliminada. Suite offline: 142 pruebas, lint, TypeScript y build aprobados.
+- Preview permanece aislado: el proveedor omite allí pre-deploy. No usarlo para recibir consultas reales; agregar su dominio a la allowlist no migra su DB. No se declara verificado para envíos.
+- No hubo commits. Siguen pendientes revisión legal, eliminación de backups, verificación del header de IP y automatización GitHub; el rate limit usa el bucket compartido conservador hasta verificar el proxy.
 
 ---
 
